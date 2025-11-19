@@ -2,8 +2,14 @@ import express from "express";
 import cors from "cors";
 import multer from "multer";
 import dotenv from "dotenv";
+import { File } from "node:buffer";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import OpenAI from "openai";
+import ffmpeg from "fluent-ffmpeg";
+import ffmpegInstaller from "@ffmpeg-installer/ffmpeg";
+import fs from "fs";
+
+ffmpeg.setFfmpegPath(ffmpegInstaller.path);
 
 dotenv.config();
 
@@ -13,16 +19,24 @@ app.use(express.json());
 
 const upload = multer({ storage: multer.memoryStorage() });
 
-// === GEMINI SETUP ===
+/* =======================
+      GEMINI SETUP
+========================= */
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-const geminiModel = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
+const geminiModel = genAI.getGenerativeModel({
+  model: "gemini-2.5-flash"
+});
 
-// === WHISPER SETUP ===
+/* =======================
+      OPENAI (WHISPER) SETUP
+========================= */
 const openai = new OpenAI({
   apiKey: process.env.WHISPER_API_KEY
 });
 
-// === /predict (TEXT) ===
+/* =======================
+      /predict (TEXT INPUT)
+========================= */
 app.post("/predict", async (req, res) => {
   try {
     const userInput = req.body.user_input;
@@ -46,39 +60,44 @@ app.post("/predict", async (req, res) => {
     res.json({ answer });
 
   } catch (error) {
-    console.error("Text error:", error);
+    console.error("❌ Text error:", error);
     res.status(500).json({ answer: "Error processing text" });
   }
 });
 
+/* =======================
+      /voice (AUDIO INPUT)
+========================= */
+import fetch from "node-fetch";
 
-// === /voice (AUDIO) ===
 app.post("/voice", upload.single("audio"), async (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({ answer: "No audio received" });
     }
 
-    // Convert Buffer → File object for OpenAI Whisper
-    const fileData = new File(
-      [req.file.buffer],
-      "voice.webm",
-      { type: "audio/webm" }
-    );
+    console.log("🎤 Received audio:", req.file.mimetype);
 
-    // Step 1 — Transcribe with Whisper
-    const transcript = await openai.audio.transcriptions.create({
-      file: fileData,
-      model: "gpt-4o-mini-tts", // Whisper replacement
-      response_format: "text"
+    const form = new FormData();
+    form.append("file", new Blob([req.file.buffer], { type: req.file.mimetype }), "audio.webm");
+    form.append("model", "whisper-1");
+    form.append("response_format", "text");
+
+    const whisperRes = await fetch("https://api.openai.com/v1/audio/transcriptions", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`
+      },
+      body: form
     });
 
-    const userText = transcript;
+    const userText = await whisperRes.text();
 
-    // Step 2 — Send extracted text to Gemini
+    console.log("📝 Whisper text:", userText);
+
+    // Gemini step
     const prompt = `
-      You are a mood-based shopping recommender.
-
+      You are a mood-based shopping assistant.
       User said: "${userText}"
 
       Respond ONLY in JSON:
@@ -90,15 +109,19 @@ app.post("/voice", upload.single("audio"), async (req, res) => {
     `;
 
     const result = await geminiModel.generateContent(prompt);
-    const answer = result.response.text();
 
-    res.json({ answer });
+    res.json({ answer: result.response.text() });
 
   } catch (error) {
-    console.error("Voice error:", error);
+    console.error("❌ Voice error:", error);
     res.status(500).json({ answer: "Error processing voice input" });
   }
 });
 
 
-app.listen(3000, () => console.log("🚀 Server running on port 3000"));
+/* =======================
+      START SERVER
+========================= */
+app.listen(3000, () =>
+  console.log("🚀 Server running on http://localhost:3000")
+);
